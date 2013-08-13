@@ -1025,148 +1025,6 @@ function showATOM()
     exit;
 }
 
-// ------------------------------------------------------------------------------------------
-// Daily RSS feed: 1 RSS entry per day giving all the links on that day.
-// Gives the last 7 days (which have links).
-// This RSS feed cannot be filtered.
-function showDailyRSS()
-{
-    // Cache system
-    $query = $_SERVER["QUERY_STRING"];
-    $cache = new pageCache(pageUrl(),startsWith($query,'do=dailyrss') && !isLoggedIn());
-    $cached = $cache->cachedVersion(); if (!empty($cached)) { echo $cached; exit; }
-    // If cached was not found (or not usable), then read the database and build the response:
-    $LINKSDB=new linkdb(isLoggedIn() || $GLOBALS['config']['OPEN_SHAARLI']);  // Read links from database (and filter private links if used it not logged in).
-
-    /* Some Shaarlies may have very few links, so we need to look
-       back in time (rsort()) until we have enough days ($nb_of_days).
-    */
-    $linkdates=array(); foreach($LINKSDB as $linkdate=>$value) { $linkdates[]=$linkdate; }
-    rsort($linkdates);
-    $nb_of_days=7; // We take 7 days.
-    $today=Date('Ymd');
-    $days=array();
-    foreach($linkdates as $linkdate)
-    {
-        $day=substr($linkdate,0,8); // Extract day (without time)
-        if (strcmp($day,$today)<0)
-        {
-            if (empty($days[$day])) $days[$day]=array();
-            $days[$day][]=$linkdate;
-        }
-        if (count($days)>$nb_of_days) break; // Have we collected enough days ?
-    }
-
-    // Build the RSS feed.
-    header('Content-Type: application/rss+xml; charset=utf-8');
-    $pageaddr=htmlspecialchars(indexUrl());
-    echo '<?xml version="1.0" encoding="UTF-8"?><rss version="2.0">';
-    echo '<channel><title>Daily - '.htmlspecialchars($GLOBALS['title']).'</title><link>'.$pageaddr.'</link>';
-    echo '<description>Daily shared links</description><language>en-en</language><copyright>'.$pageaddr.'</copyright>'."\n";
-
-    foreach($days as $day=>$linkdates) // For each day.
-    {
-        $daydate = utf8_encode(strftime('%A %d, %B %Y',linkdate2timestamp($day.'_000000'))); // Full text date
-        $rfc822date = linkdate2rfc822($day.'_000000');
-        $absurl=htmlspecialchars(indexUrl().'?do=daily&day='.$day);  // Absolute URL of the corresponding "Daily" page.
-        echo '<item><title>'.htmlspecialchars($GLOBALS['title'].' - '.$daydate).'</title><guid>'.$absurl.'</guid><link>'.$absurl.'</link>';
-        echo '<pubDate>'.htmlspecialchars($rfc822date)."</pubDate>";
-
-        // Build the HTML body of this RSS entry.
-        $html='';
-        $href='';
-        $links=array();
-        // We pre-format some fields for proper output.
-        foreach($linkdates as $linkdate)
-        {
-            $l = $LINKSDB[$linkdate];
-            $l['formatedDescription']=nl2br(keepMultipleSpaces(text2clickable(htmlspecialchars($l['description']))));
-            $l['thumbnail'] = thumbnail($l['url']);
-            $l['localdate']=linkdate2locale($l['linkdate']);
-            if (startsWith($l['url'],'?')) $l['url']=indexUrl().$l['url'];  // make permalink URL absolute
-            $links[$linkdate]=$l;
-        }
-        // Then build the HTML for this day:
-        $tpl = new RainTPL;
-        $tpl->assign('links',$links);
-        $html = $tpl->draw('dailyrss',$return_string=true);
-        echo "\n";
-        echo '<description><![CDATA['.$html.']]></description>'."\n</item>\n\n";
-
-    }
-    echo '</channel></rss><!-- Cached version of '.pageUrl().' -->';
-
-    $cache->cache(ob_get_contents());
-    ob_end_flush();
-    exit;
-}
-
-// "Daily" page.
-function showDaily()
-{
-    $LINKSDB=new linkdb(isLoggedIn() || $GLOBALS['config']['OPEN_SHAARLI']);  // Read links from database (and filter private links if used it not logged in).
-
-
-    $day=Date('Ymd',strtotime('-1 day')); // Yesterday, in format YYYYMMDD.
-    if (isset($_GET['day'])) $day=$_GET['day'];
-
-    $days = $LINKSDB->days();
-    $i = array_search($day,$days);
-    if ($i==false) { $i=count($days)-1; $day=$days[$i]; }
-    $previousday='';
-    $nextday='';
-    if ($i!==false)
-    {
-        if ($i>1) $previousday=$days[$i-1];
-        if ($i<count($days)-1) $nextday=$days[$i+1];
-    }
-
-    $linksToDisplay=$LINKSDB->filterDay($day);
-    // We pre-format some fields for proper output.
-    foreach($linksToDisplay as $key=>$link)
-    {
-        $taglist = explode(' ',$link['tags']);
-        uasort($taglist, 'strcasecmp');
-        $linksToDisplay[$key]['taglist']=$taglist;
-        $linksToDisplay[$key]['formatedDescription']=nl2br(keepMultipleSpaces(text2clickable(htmlspecialchars($link['description']))));
-        $linksToDisplay[$key]['thumbnail'] = thumbnail($link['url']);
-    }
-
-    /* We need to spread the articles on 3 columns.
-       I did not want to use a javascript lib like http://masonry.desandro.com/
-       so I manually spread entries with a simple method: I roughly evaluate the
-       height of a div according to title and description length.
-    */
-    $columns=array(array(),array(),array()); // Entries to display, for each column.
-    $fill=array(0,0,0);  // Rough estimate of columns fill.
-    foreach($linksToDisplay as $key=>$link)
-    {
-        // Roughly estimate length of entry (by counting characters)
-        // Title: 30 chars = 1 line. 1 line is 30 pixels height.
-        // Description: 836 characters gives roughly 342 pixel height.
-        // This is not perfect, but it's usually ok.
-        $length=strlen($link['title'])+(342*strlen($link['description']))/836;
-        if ($link['thumbnail']) $length +=100; // 1 thumbnails roughly takes 100 pixels height.
-        // Then put in column which is the less filled:
-        $smallest=min($fill); // find smallest value in array.
-        $index=array_search($smallest,$fill); // find index of this smallest value.
-        array_push($columns[$index],$link); // Put entry in this column.
-        $fill[$index]+=$length;
-    }
-    $PAGE = new pageBuilder;
-    $PAGE->assign('linksToDisplay',$linksToDisplay);
-    $PAGE->assign('linkcount',count($LINKSDB));
-    $PAGE->assign('col1',$columns[0]);
-    $PAGE->assign('col1',$columns[0]);
-    $PAGE->assign('col2',$columns[1]);
-    $PAGE->assign('col3',$columns[2]);
-    $PAGE->assign('day',utf8_encode(strftime('%A %d, %B %Y',linkdate2timestamp($day.'_000000'))));
-    $PAGE->assign('previousday',$previousday);
-    $PAGE->assign('nextday',$nextday);
-    $PAGE->renderPage('daily');
-    exit;
-}
-
 
 // ------------------------------------------------------------------------------------------
 // Render HTML page (according to URL parameters and user rights)
@@ -1273,7 +1131,7 @@ function renderPage()
         exit;
     }
 
-    // -------- User wants to change the number of links per page (linksperpage=...)
+    // -------- Usedailr wants to change the number of links per page (linksperpage=...)
     if (isset($_GET['linksperpage']))
     {
         if (is_numeric($_GET['linksperpage'])) { $_SESSION['LINKS_PER_PAGE']=abs(intval($_GET['linksperpage'])); }
@@ -2435,8 +2293,6 @@ function invalidateCaches()
 if (isset($_SERVER["QUERY_STRING"]) && startswith($_SERVER["QUERY_STRING"],'do=genthumbnail')) { genThumbnail(); exit; }  // Thumbnail generation/cache does not need the link database.
 if (isset($_SERVER["QUERY_STRING"]) && startswith($_SERVER["QUERY_STRING"],'do=rss')) { showRSS(); exit; }
 if (isset($_SERVER["QUERY_STRING"]) && startswith($_SERVER["QUERY_STRING"],'do=atom')) { showATOM(); exit; }
-if (isset($_SERVER["QUERY_STRING"]) && startswith($_SERVER["QUERY_STRING"],'do=dailyrss')) { showDailyRSS(); exit; }
-if (isset($_SERVER["QUERY_STRING"]) && startswith($_SERVER["QUERY_STRING"],'do=daily')) { showDaily(); exit; }
 if (isset($_SERVER["QUERY_STRING"]) && startswith($_SERVER["QUERY_STRING"],'ws=')) { processWS(); exit; } // Webservices (for jQuery/jQueryUI)
 if (!isset($_SESSION['LINKS_PER_PAGE'])) $_SESSION['LINKS_PER_PAGE']=$GLOBALS['config']['LINKS_PER_PAGE'];
 renderPage();
